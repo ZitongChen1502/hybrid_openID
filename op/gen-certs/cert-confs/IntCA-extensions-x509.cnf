@@ -1,4 +1,4 @@
-[v3_ca]
+[v3_intermediate_ca]
 basicConstraints = critical, CA:TRUE
 keyUsage = critical, digitalSignature, cRLSign, keyCertSign
 #keyUsage = digitalSignature, keyEncipherment

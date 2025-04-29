@@ -1,144 +1,238 @@
-#!/bin/bash
-# Author: Alexandre Giron and Frederico Schardong
-# Script for generating Classical and PQC certificates from a list of algorithms in Docker
+#!/usr/bin/env bash
+set -xe   # <— prints each command before executing, and exits on any error
 
-#Conf Files
+# === Debug info ===
+OQS_OPENSSL_CMD="${OQS_OPENSSL_CMD:-openssl}"
+echo "Using OpenSSL command: $OQS_OPENSSL_CMD"
+echo "Modules path:        $OPENSSL_MODULES"
+echo "Raw TLS_SIGALG (build arg): '$TLS_SIGALG'"
+# TLS_SIGN is mentioned in project README for runtime, may not be present at build time
+echo "Raw TLS_SIGN (runtime var): '$TLS_SIGN'"
+echo "Raw JWT_SIGN (build arg):   '$JWT_SIGN'"
+
 prefix="op"
 serverIP="${OP_IP:-op}"
 subjectAltNameType="${SUBJECT_ALT_NAME_TYPE:-DNS}"
 WORKING_DIR="${prefix}_certs"
-OQS_OPENSSL_DIR="/usr/local/bin/"
-export OPENSSL_CONF=/etc/ssl/openssl.cnf
+CONF_DIR="/opt/cert-confs" # Assuming this path from Dockerfile COPY
 
-rootconf="cert-confs/openssl_root_conf.cnf"
-intermediateconf="cert-confs/openssl_intermediate.cnf"
-intermediateExt="cert-confs/IntCA-extensions-x509.cnf"
-serverconf="cert-confs/openssl_server.cnf"
-endcertExt="cert-confs/EndCert-extensions-x509.cnf"
-clientconf="cert-confs/openssl_client_auth.cnf"
-
-rootCADir="$WORKING_DIR/RootCA/"
-intermediaryCAsDir="$WORKING_DIR/IntermediaryCAs/"
-serverCerts="$WORKING_DIR/ServerCerts/"
-JWTKeys="$WORKING_DIR/JWTKeys/"
-
-#Certificate Algos
-#should this come from a separate file?
-declare -a arrayalgos=("rsa" "ecdsa" "dilithium2" "dilithium3" "dilithium5" "falcon512" "falcon1024" "sphincsshake256128fsimple" "sphincsshake256192fsimple" "sphincsshake256256fsimple") 
-declare -a arrayJWTalgos=("rsa" "ecdsa") 
-
-declare -A signatureSizes
-
-signatureSizes["rsa"]=256
-signatureSizes["ecdsa"]=70
-signatureSizes["dilithium2"]=2420
-signatureSizes["dilithium3"]=3293
-signatureSizes["dilithium5"]=4595
-signatureSizes["falcon512"]=656
-signatureSizes["falcon1024"]=1275
-signatureSizes["sphincsshake256128fsimple"]=17088
-signatureSizes["sphincsshake256192fsimple"]=35664
-signatureSizes["sphincsshake256256fsimple"]=49856
-
-echo "-------------------------------------------------------------------------------------------------------------"
-echo "Generating Self-signed (root) CA certs:"
-mkdir -p $rootCADir
-
-for algo in "${arrayalgos[@]}"; do
-    echo "Generating for: $algo"
-
-    if [ "$algo" = "ecdsa" ]; then
-        $OQS_OPENSSL_DIR/openssl ecparam -genkey -name prime256v1 -noout -out "$rootCADir/${prefix}_$algo.key"
-    else
-        if [ "$algo" = "rsa" ]; then
-            $OQS_OPENSSL_DIR/openssl genpkey -algorithm rsa -pkeyopt rsa_keygen_bits:2048 -out "$rootCADir/${prefix}_$algo.key"
-        else
-            $OQS_OPENSSL_DIR/openssl genpkey -algorithm $algo -out "$rootCADir/${prefix}_$algo.key"
-        fi
-    fi
-    
-    #Gen self-signed certificate
-    $OQS_OPENSSL_DIR/openssl req -x509 -new -key "$rootCADir/${prefix}_$algo.key" -out "$rootCADir/${prefix}_$algo.crt" -nodes -subj "/CN=LABSEC oqstest CA" -extensions v3_ca -config $rootconf -days 1095
+# Prepare all the output dirs
+for d in RootCA IntermediaryCAs ServerCerts JWTKeys; do
+  mkdir -p "$WORKING_DIR/$d"
 done
 
-echo "-------------------------------------------------------------------------------------------------------------"
-echo "Generating Intermediate CAs certs:"
-mkdir -p $intermediaryCAsDir
+# Config files
+rootconf="$CONF_DIR/openssl_root_conf.cnf"
+intermediateconf="$CONF_DIR/openssl_intermediate.cnf"
+intermediateExt="$CONF_DIR/IntCA-extensions-x509.cnf"
+endcertExt="$CONF_DIR/EndCert-extensions-x509.cnf"
 
-for algo in "${arrayalgos[@]}"; do
-    echo "Generating for: $algo"
-    
-    if [ "$algo" = "ecdsa" ]; then
-        $OQS_OPENSSL_DIR/openssl ecparam -genkey -name prime256v1 -noout -out "$intermediaryCAsDir/${prefix}_$algo.key"
-    else
-        if [ "$algo" = "rsa" ]; then
-            $OQS_OPENSSL_DIR/openssl genpkey -algorithm rsa -pkeyopt rsa_keygen_bits:2048 -out "$intermediaryCAsDir/${prefix}_$algo.key"
-        else
-            $OQS_OPENSSL_DIR/openssl genpkey -algorithm $algo -out "$intermediaryCAsDir/${prefix}_$algo.key"
-        fi
+# Only classical CAs here
+ca_algos=(rsa ecdsa)
+
+# --- Helper Function for Provider Flags ---
+# Returns the necessary provider flags ONLY if OPENSSL_MODULES is set and algo is OQS
+get_provider_flags() {
+    local algo="$1"
+    local flags=""
+    # Check if the algorithm is likely an OQS one AND if modules path is set
+    # Include known hybrids that need the provider for keygen
+    if [[ ! " ${ca_algos[*]} " =~ " $algo " ]] && [[ -n "$OPENSSL_MODULES" ]]; then
+        # Correct order: default first, then oqsprovider, with paths
+        flags="-provider default -provider-path $OPENSSL_MODULES -provider oqsprovider -provider-path $OPENSSL_MODULES"
     fi
-        
-    #Gen request (Using same configuration as RootCA)
-    $OQS_OPENSSL_DIR/openssl req -new -key "$intermediaryCAsDir/${prefix}_$algo.key" -out "$intermediaryCAsDir/${prefix}_$algo.csr" -nodes -subj "/CN=LABSEC oqstest IntCA" -config $intermediateconf -addext basicConstraints=critical,CA:true,pathlen:0 -addext keyUsage=critical,digitalSignature,cRLSign,keyCertSign
+    echo "$flags"
+}
 
-    #Sign it by the corresponding root CA, generating the certificate
-    $OQS_OPENSSL_DIR/openssl x509 -req -in "$intermediaryCAsDir/${prefix}_$algo.csr" -out "$intermediaryCAsDir/${prefix}_$algo.crt" -CA "$rootCADir/${prefix}_$algo.crt" -CAkey "$rootCADir/${prefix}_$algo.key" -CAcreateserial -days 1095 -extensions v3_ca -extfile "$intermediateExt"
+# --- Helper Function for Key Generation (Private + Public) ---
+generate_key() {
+    local algo="$1"
+    local keyfile="$2"
+    local pubfile="${keyfile%.key}.pub" # Derive public key filename
+    # Get flags as a string
+    local provider_flags_str=$(get_provider_flags "$algo")
 
-    #Create bundle
-    cat "$intermediaryCAsDir/${prefix}_$algo.crt" "$rootCADir/${prefix}_$algo.crt" > "$intermediaryCAsDir/bundlecerts_chain_${prefix}_$algo.crt"
+    echo "→ genpkey $algo -> $keyfile"
+
+    case "$algo" in
+        rsa)
+            "$OQS_OPENSSL_CMD" genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$keyfile"
+            ;;
+        ecdsa)
+            # Use P-256 curve (prime256v1) common for JWT ES256
+            "$OQS_OPENSSL_CMD" genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 -out "$keyfile"
+            ;;
+        # Handle OQS and hybrid algorithms known to be supported by genpkey via provider
+        dilithium*|falcon*|sphincs*|kyber*|frodo*|p256_falcon512|rsa3072_falcon512|p521_falcon1024)
+            # OQS algorithms - pass the flags string directly, let shell parse it
+            "$OQS_OPENSSL_CMD" genpkey -algorithm "$algo" -out "$keyfile" $provider_flags_str
+            ;;
+        *)
+            echo "   ERROR: Unknown algorithm '$algo' in generate_key" >&2
+            exit 1
+            ;;
+    esac
+    if [ $? -ne 0 ]; then echo "ERROR: Private key generation failed for $algo"; exit 1; fi
+
+    # Generate corresponding public key
+    echo "→ pkey -pubout $algo -> $pubfile"
+    "$OQS_OPENSSL_CMD" pkey -in "$keyfile" -pubout -out "$pubfile" $provider_flags_str
+     if [ $? -ne 0 ]; then
+        echo "ERROR: Failed to generate public key for $algo from $keyfile"
+        exit 1
+    fi
+    echo "   Keys generated: $keyfile / $pubfile"
+}
+
+
+# ─── Root CAs ───────────────────────────────────────────────────────────────
+echo "=== Generating Root CAs ==="
+for algo in "${ca_algos[@]}"; do
+  key="$WORKING_DIR/RootCA/${prefix}_rootca_${algo}.key"
+  crt="$WORKING_DIR/RootCA/${prefix}_rootca_${algo}.crt"
+  provider_flags_str=$(get_provider_flags "$algo") # Empty for classical
+
+  generate_key "$algo" "$key"
+
+  echo "→ Self-sign Root CA ($algo)"
+  "$OQS_OPENSSL_CMD" req -x509 -new -nodes \
+    -key    "$key" \
+    -out    "$crt" \
+    -subj   "/CN=OQS Root CA ($algo)" \
+    -config "$rootconf" \
+    -extensions v3_ca \
+    $provider_flags_str \
+    -days   3650
+  if [ $? -ne 0 ]; then echo "ERROR: Root CA cert generation failed for $algo"; exit 1; fi
 done
 
-echo "-------------------------------------------------------------------------------------------------------------"
-echo "Generating Server-certs (2-level chain): for /CN=$serverIP subjectAltName=$subjectAltNameType:$serverIP"
-mkdir -p $serverCerts
+# ─── Intermediate CAs ────────────────────────────────────────────────────────
+echo "=== Generating Intermediate CAs ==="
+for algo in "${ca_algos[@]}"; do
+  rkey="$WORKING_DIR/RootCA/${prefix}_rootca_${algo}.key"
+  rcrt="$WORKING_DIR/RootCA/${prefix}_rootca_${algo}.crt"
+  ikey="$WORKING_DIR/IntermediaryCAs/${prefix}_intca_${algo}.key"
+  icsr="$WORKING_DIR/IntermediaryCAs/${prefix}_intca_${algo}.csr"
+  icrt="$WORKING_DIR/IntermediaryCAs/${prefix}_intca_${algo}.crt"
+  bundle="$WORKING_DIR/IntermediaryCAs/bundle_chain_${prefix}_${algo}.crt"
+  provider_flags_str=$(get_provider_flags "$algo") # Empty for classical
 
-for algo in "${arrayalgos[@]}"; do
-    echo "Generating for: $algo"
+  generate_key "$algo" "$ikey"
 
-    if [ "$algo" = "ecdsa" ]; then
-        $OQS_OPENSSL_DIR/openssl ecparam -genkey -name prime256v1 -noout -out "$serverCerts/${prefix}_${algo}_$serverIP.key"
-    else
-        if [ "$algo" = "rsa" ]; then
-            $OQS_OPENSSL_DIR/openssl genpkey -algorithm rsa -pkeyopt rsa_keygen_bits:2048 -out "$serverCerts/${prefix}_${algo}_$serverIP.key"
-        else
-            $OQS_OPENSSL_DIR/openssl genpkey -algorithm $algo -out "$serverCerts/${prefix}_${algo}_$serverIP.key"
-        fi
-    fi
-    
-    SCT="1.3.6.1.4.1.11129.2.4.2=ASN1:OCTETSTRING:$($OQS_OPENSSL_DIR/openssl rand -hex ${signatureSizes[$algo]})"
-    altName="subjectAltName = $subjectAltNameType:$serverIP"
+  echo "→ CSR for Intermediate CA ($algo)"
+  "$OQS_OPENSSL_CMD" req -new -nodes \
+    -key    "$ikey" \
+    -out    "$icsr" \
+    -subj   "/CN=OQS Intermediate CA ($algo)" \
+    -config "$intermediateconf" \
+    $provider_flags_str
+  if [ $? -ne 0 ]; then echo "ERROR: Intermediate CA CSR generation failed for $algo"; exit 1; fi
 
-    #add our new SCT
-    echo $altName >> $endcertExt
-    echo $SCT >> $endcertExt
-    
-    #Gen csr request (for localhost test)
-    $OQS_OPENSSL_DIR/openssl req -new -key "$serverCerts/${prefix}_${algo}_$serverIP.key" -out "$serverCerts/${prefix}_${algo}_$serverIP.csr" -nodes -subj "/CN=$serverIP" -addext basicConstraints=CA:FALSE -addext extendedKeyUsage=serverAuth -addext keyUsage=critical,digitalSignature,keyEncipherment -addext "$altName" -addext $SCT
+  echo "→ Signing Intermediate with Root CA ($algo)"
+  # Use provider flags relevant to the signing CA key
+  signing_provider_flags_str=$(get_provider_flags "$algo")
+  "$OQS_OPENSSL_CMD" x509 -req \
+    -in       "$icsr" \
+    -CA       "$rcrt" \
+    -CAkey    "$rkey" \
+    -CAcreateserial \
+    -out      "$icrt" \
+    -extfile  "$intermediateExt" \
+    -extensions v3_intermediate_ca \
+    $signing_provider_flags_str \
+    -days     1825
+  if [ $? -ne 0 ]; then echo "ERROR: Intermediate CA cert signing failed for $algo"; exit 1; fi
 
-    #Generating certificates from csr
-    $OQS_OPENSSL_DIR/openssl x509 -req -in "$serverCerts/${prefix}_${algo}_$serverIP.csr" -out "$serverCerts/${prefix}_${algo}_$serverIP.crt" -CA "$intermediaryCAsDir/${prefix}_$algo.crt" -CAkey "$intermediaryCAsDir/${prefix}_$algo.key" -CAcreateserial -days 1095 -extensions server_cert -extfile "$endcertExt"
-    
-    $OQS_OPENSSL_DIR/openssl x509 -in "$serverCerts/${prefix}_${algo}_$serverIP.crt" -text
-    
-    #Create bundle
-    cat "$serverCerts/${prefix}_${algo}_$serverIP.crt" "$intermediaryCAsDir/bundlecerts_chain_${prefix}_$algo.crt" > "$serverCerts/bundlecerts_chain_${prefix}_${algo}_$serverIP.crt"
+  cat "$icrt" "$rcrt" > "$bundle"
+  # rm "$icsr" # Optional cleanup
 done
 
+# ─── Server Certificate ─────────────────────────────────────────────────────
+# choose from TLS_SIGALG build-arg first, then TLS_SIGN runtime var (likely empty at build), else default
+serverAlgo="${TLS_SIGALG:-p256_falcon512}"
+echo "=== Generating Server Cert for TLS=$serverAlgo ==="
+echo "   (Signing with ECDSA Intermediate CA)"
+ikey="$WORKING_DIR/IntermediaryCAs/${prefix}_intca_ecdsa.key"
+icrt="$WORKING_DIR/IntermediaryCAs/${prefix}_intca_ecdsa.crt"
+ibundle="$WORKING_DIR/IntermediaryCAs/bundle_chain_${prefix}_ecdsa.crt" # Bundle used for final chain
+sKey="$WORKING_DIR/ServerCerts/${prefix}_server_${serverAlgo}.key"
+sCsr="$WORKING_DIR/ServerCerts/${prefix}_server_${serverAlgo}.csr"
+sCrt="$WORKING_DIR/ServerCerts/${prefix}_server_${serverAlgo}.crt"
+sBundle="$WORKING_DIR/ServerCerts/bundle_chain_${prefix}_${serverAlgo}.crt"
+
+# Check if signing CA files exist
+if [ ! -f "$ikey" ] || [ ! -f "$icrt" ]; then
+    echo "   ERROR: Intermediate CA key or certificate for signing algorithm ecdsa not found. Cannot sign Server Cert." >&2
+    exit 1
+fi
+
+# Generate the server key (potentially hybrid)
+generate_key "$serverAlgo" "$sKey"
+
+echo "→ CSR for Server Cert"
+altName="$subjectAltNameType:$serverIP"
+# Get provider flags needed for the specific server key algorithm
+server_provider_flags_str=$(get_provider_flags "$serverAlgo")
+"$OQS_OPENSSL_CMD" req -new -nodes \
+  $server_provider_flags_str \
+  -key     "$sKey" \
+  -out     "$sCsr" \
+  -subj    "/CN=$serverIP" \
+  -addext  "subjectAltName=$altName" \
+  -config  "$endcertExt"
+if [ $? -ne 0 ]; then echo "ERROR: Server CSR generation failed for $serverAlgo"; exit 1; fi
+
+echo "→ Signing Server Cert"
+# **** CORRECTED: Use provider flags for the CSR's algorithm ($serverAlgo) ****
+# **** (The flags for the signing CA key are not needed here) ****
+csr_provider_flags_str=$(get_provider_flags "$serverAlgo")
+"$OQS_OPENSSL_CMD" x509 -req \
+  $csr_provider_flags_str \
+  -in       "$sCsr" \
+  -CA       "$icrt" \
+  -CAkey    "$ikey" \
+  -CAcreateserial \
+  -out      "$sCrt" \
+  -extfile  "$endcertExt" \
+  -extensions usr_cert \
+  -days     365
+if [ $? -ne 0 ]; then echo "ERROR: Server cert signing failed for $serverAlgo with ecdsa CA"; exit 1; fi
+
+# Create the final bundle including the server cert and the signing CA's bundle
+cat "$sCrt" "$ibundle" > "$sBundle"
+# rm "$sCsr" # Optional cleanup
+
+# ─── JWT Keys ─────────────────────────────────────────────────────────────────
+echo "=== Generating JWT Keys ($JWT_SIGN) ==="
+mkdir -p "$WORKING_DIR/JWTKeys"
+case "$JWT_SIGN" in
+  p256_falcon512)
+    generate_key ecdsa    "$WORKING_DIR/JWTKeys/${prefix}_jwt_p256.key"
+    generate_key falcon512 "$WORKING_DIR/JWTKeys/${prefix}_jwt_falcon512.key"
+    ;;
+  rsa)
+    generate_key rsa "$WORKING_DIR/JWTKeys/${prefix}_jwt_rsa.key"
+    ;;
+  ecdsa)
+    generate_key ecdsa "$WORKING_DIR/JWTKeys/${prefix}_jwt_p256.key"
+    ;;
+  # Add other specific supported hybrid or single algorithms here
+  *)
+    echo "WARNING: Unrecognized or generic JWT_SIGN='$JWT_SIGN', attempting generic keygen..."
+    # Ensure the generic algorithm is supported by generate_key
+    generate_key "$JWT_SIGN" "$WORKING_DIR/JWTKeys/${prefix}_jwt_${JWT_SIGN}.key"
+    ;;
+esac
+
+# --- JWKS Generation Placeholder ---
 echo "-------------------------------------------------------------------------------------------------------------"
-echo "Generating JWT Keys"
-mkdir -p $JWTKeys
+echo "Placeholder for JWKS Generation - Implement this step!"
+echo "Example: jose jwk from-pem \"$JWTKeys/${prefix}_jwt_p256.pub\" --alg ES256 --kid p256_key -o \"$JWTKeys/p256.jwk\""
+echo "Example: jose jwk from-pem \"$JWTKeys/${prefix}_jwt_falcon512.pub\" --alg FALCON512 --kid falcon_key -o \"$JWTKeys/falcon512.jwk\""
+echo "Example: jose jwks merge \"$JWTKeys/p256.jwk\" \"$JWTKeys/falcon512.jwk\" -o \"$JWTKeys/hybrid_jwks.json\""
+echo "-------------------------------------------------------------------------------------------------------------"
 
-for algo in "${arrayJWTalgos[@]}"; do
-    echo "Generating for: $algo"
 
-    if [ "$algo" = "ecdsa" ]; then
-        $OQS_OPENSSL_DIR/openssl ecparam -genkey -name prime256v1 -noout -out "$JWTKeys/${prefix}_$algo.key"
-    else
-        if [ "$algo" = "rsa" ]; then
-            $OQS_OPENSSL_DIR/openssl genpkey -algorithm rsa -pkeyopt rsa_keygen_bits:2048 -out "$JWTKeys/${prefix}_$algo.key"
-        else
-            $OQS_OPENSSL_DIR/openssl genpkey -algorithm $algo -out "$JWTKeys/${prefix}_$algo.key"
-        fi
-    fi
-done
+echo "All certs and keys are in: $WORKING_DIR"
+ls -lR "$WORKING_DIR"
 

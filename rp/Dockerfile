@@ -1,104 +1,123 @@
-# Multi-stage build: First the full builder image:
-FROM alpine:3.11 as liboqs-python-wrapper
-
-# Take in all global args
-ARG LIBOQS_BUILD_DEFINES="-DOQS_DIST_BUILD=ON -DBUILD_SHARED_LIBS=ON -DOQS_USE_OPENSSL=OFF"
-ARG MAKE_DEFINES="-j 2"
-
-LABEL version="2"
-
-ENV DEBIAN_FRONTEND noninteractive
-
-RUN apk update && apk upgrade
-
-# Get all software packages required for builing all components:
-RUN apk add build-base linux-headers cmake ninja git
-
-# get all sources
-WORKDIR /opt
-RUN git clone --depth 1 --branch main https://github.com/open-quantum-safe/liboqs && \
-    git clone --depth 1 --branch main https://github.com/open-quantum-safe/liboqs-python.git
-
-# build liboqs
-WORKDIR /opt/liboqs
-
-# had to go back a few commits for to get the generate.py script working
-RUN git fetch --depth=1 origin af76ca3b1f2fbc1f4f0967595f3bb07692fb3d82
-RUN git checkout af76ca3b1f2fbc1f4f0967595f3bb07692fb3d82
-RUN git branch -D @{-1}
-
-RUN mkdir build && cd build && cmake -GNinja .. ${LIBOQS_BUILD_DEFINES} && ninja install
-
-WORKDIR /opt
-RUN git clone --depth 1 --branch OQS-OpenSSL_1_1_1-stable https://github.com/open-quantum-safe/openssl.git
-
-WORKDIR /opt/openssl
-
-RUN apk add py3-pip
-RUN pip3 install --no-cache --upgrade pip setuptools
-RUN pip3 install Jinja2 PyYAML tabulate
-
-# had to go back a few commits for to get the generate.py script working
-RUN git fetch --depth=1 origin ea1ab6797ec829e8440639995b061c3b81234b14
-RUN git checkout ea1ab6797ec829e8440639995b061c3b81234b14
-RUN git branch -D @{-1}
-
-ARG LIBOQS_DOCS_DIR=/opt/liboqs/docs
-ARG LIBOQS_SRC_DIR=/opt/liboqs
-COPY generate_openssl_1.1.1.yml oqs-template/generate.yml
-RUN python3 oqs-template/generate.py
-
-WORKDIR /opt/liboqs
-
-RUN mkdir build-openssl && cd build-openssl && cmake -G"Ninja" .. ${LIBOQS_BUILD_DEFINES} -DCMAKE_INSTALL_PREFIX=/opt/openssl/oqs && ninja install
-
-RUN apk add automake autoconf && cd /opt/openssl && LDFLAGS="-Wl,-rpath -Wl,/usr/local/lib64" ./Configure shared linux-x86_64 -lm && make generate_crypto_objects && make ${MAKE_DEFINES} && make install_sw
-
-RUN apk add bash
-
-COPY gen-certs /gen-certs
-WORKDIR /gen-certs
-
-RUN chmod +x gen-certs.sh
-
-ARG SUBJECT_ALT_NAME_TYPE
-ENV SUBJECT_ALT_NAME_TYPE=$SUBJECT_ALT_NAME_TYPE
+##############################################################################
+# Stage 1: Build PQ libs + provider + Python wrapper + generate cert
+##############################################################################
+FROM ubuntu:22.04 AS builder
 
 ARG RP_IP
-ENV RP_IP=$RP_IP
+ARG TLS_SIGALG=p256_falcon512
 
-RUN ./gen-certs.sh
+# 1) Build tools + OpenSSL + Python build deps
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      build-essential cmake git libssl-dev openssl \
+      python3-dev python3-pip findutils \
+    && rm -rf /var/lib/apt/lists/*
 
+# 2) liboqs
+WORKDIR /opt/liboqs
+RUN echo "=== Building liboqs ===" \
+ && git clone --depth 1 https://github.com/open-quantum-safe/liboqs.git . \
+ && mkdir build && cd build \
+ && cmake -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DBUILD_SHARED_LIBS=ON \
+          -DOQS_DIST_BUILD=ON .. \
+ && make -j$(nproc) install \
+ && echo "=== Finished liboqs install ==="
+
+# 3) oqs-provider
+WORKDIR /opt/oqs-provider
+RUN echo "=== Building oqs-provider ===" \
+ && git clone --depth 1 https://github.com/open-quantum-safe/oqs-provider.git . \
+ && mkdir build && cd build \
+ && cmake -DCMAKE_INSTALL_PREFIX=/usr/local \
+         -DCMAKE_PREFIX_PATH=/usr/local .. \
+ && make -j$(nproc) install \
+ && echo "=== Finished oqs-provider install ===" \
+ && echo "Installed provider module at:" \
+ && find /usr/lib/x86_64-linux-gnu/ossl-modules -name oqsprovider.so
+
+# 3.1) Update linker cache so liboqs.so.7 is visible
+RUN printf "/usr/local/lib\n/usr/local/lib64\n" \
+      > /etc/ld.so.conf.d/liboqs-builder.conf \
+ && ldconfig
+
+# 4) liboqs-python
 WORKDIR /opt/liboqs-python
+RUN echo "=== Building liboqs-python ===" \
+ && git clone --depth 1 https://github.com/open-quantum-safe/liboqs-python.git . \
+ && pip3 install . \
+ && echo "=== Finished liboqs-python install ==="
 
-# had to go back a few commits for to get the generate.py script working
-RUN git fetch --depth=1 origin ff976e68e225980d7003db6aa8b82dbaf9279fa5
-RUN git checkout ff976e68e225980d7003db6aa8b82dbaf9279fa5
-RUN git branch -D @{-1}
+# 5) Generate one hybrid certificate
+ENV OPENSSL_MODULES=/usr/lib/x86_64-linux-gnu/ossl-modules
 
-## second stage: Only create minimal image without build tooling and liboqs-python-wrapper build results generated above:
-FROM python:3.10-alpine3.13
+RUN echo "=== Generating RP certificate using $TLS_SIGALG ===" \
+ && mkdir -p /rp_certs \
+ && openssl genpkey \
+      -provider default \
+      -provider-path $OPENSSL_MODULES \
+      -provider oqsprovider \
+      -algorithm $TLS_SIGALG \
+      -out /rp_certs/rp.key \
+ && openssl req -x509 \
+      -provider default \
+      -provider-path $OPENSSL_MODULES \
+      -provider oqsprovider \
+      -new -key /rp_certs/rp.key \
+      -out /rp_certs/rp.crt \
+      -days 365 \
+      -subj "/CN=rp" \
+ && ls -l /rp_certs
 
-# Get all software packages required for running all components:
-RUN apk update && apk upgrade && apk add gcc libc-dev libffi-dev python3-dev openldap-dev
+##############################################################################
+# Stage 2: Final RP image
+##############################################################################
+FROM python:3.10-slim
 
-# Only retain the binary contents in the final image
-COPY --from=liboqs-python-wrapper /usr/local /usr/local
-COPY --from=liboqs-python-wrapper /opt/liboqs-python /opt/liboqs-python
-COPY --from=liboqs-python-wrapper /gen-certs/rp_certs /rp_certs
+# 1) Copy PQ-enabled OpenSSL + libs
+COPY --from=builder /usr/local /usr/local
 
-ENV PYTHONPATH=/opt/liboqs-python
+# 2) Copy OQS provider modules
+COPY --from=builder /usr/lib/x86_64-linux-gnu/ossl-modules \
+                     /usr/lib/x86_64-linux-gnu/ossl-modules
+
+# 3) Symlink liboqs for ctypes
+RUN for d in /usr/local/lib /usr/local/lib64; do \
+      if [ -f "$d/liboqs.so" ]; then \
+        cd "$d" && ln -sf liboqs.so libliboqs.so && ln -sf liboqs.so libliboqs.a; \
+      fi; \
+    done
+
+# 4) Update linker cache in final image
+RUN printf "/usr/local/lib\n/usr/local/lib64\n/usr/lib/x86_64-linux-gnu\n" \
+      > /etc/ld.so.conf.d/liboqs.conf \
+ && ldconfig
+
+# 5) Install Python wrapper
+COPY --from=builder /opt/liboqs-python /opt/liboqs-python
+RUN pip3 install --no-cache-dir /opt/liboqs-python
+
+# 6) Copy generated certificates
+COPY --from=builder /rp_certs /rp_certs
+
+# 7) Runtime environment variables
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64
+ENV OPENSSL_MODULES=/usr/lib/x86_64-linux-gnu/ossl-modules
+
+# 8) Install runtime dependencies
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      libssl3 gcc python3-dev libldap2-dev libsasl2-dev findutils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY app/post-quantum-pyjwkest /app/post-quantum-pyjwkest
+ENV JWT_SIGN=es256_falcon512
+# default JWT_SIGN to p256_falcon512 (so KEY_TYPE → "PQC")
+ENV TLS_SIGALG="" 
+
 
 COPY app/requirements.txt .
-
-USER root
-
-ENV LD_LIBRARY_PATH=
-RUN pip3 install --no-cache --upgrade pip setuptools
-RUN pip3 install -r requirements.txt
-ENV LD_LIBRARY_PATH='/usr/local/lib64'
-
+RUN pip3 install --no-cache-dir -r requirements.txt
 COPY app /app
-WORKDIR /app
 
-CMD ["python3", "app.py"]
+EXPOSE 8080
+CMD ["python3","app.py"]
