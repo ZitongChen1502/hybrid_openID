@@ -146,6 +146,12 @@ def userinfo():
         return redirect(url_for('auth'))
     return jsonify(session['user'])
 
+@app.route("/token", methods=["POST"])
+def rp_token():
+    # Parse, log or proxy the incoming request…
+    return jsonify({"error": "invalid_request", "error_description": "no code"}), 400
+
+
 if __name__ == '__main__':
     # Listen on port 80 so `curl localhost/auth` works without specifying port
     app.run(host='0.0.0.0', port=80)

@@ -311,10 +311,25 @@ if __name__ == "__main__":
 
         cert_path = f"/op_certs/ServerCerts/bundlecerts_chain_op_{TLS_SIGN}_{OP_IP}.crt"
         key_path  = f"/op_certs/ServerCerts/op_{TLS_SIGN}_{OP_IP}.key"
+        
+        sslContext = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+
+        # ─── DEBUG: dump what we're about to load ────────────────────────
+        import os, sys
+        print("🔍 [DEBUG] cert_path =", cert_path, file=sys.stderr)
+        print("🔍 [DEBUG] key_path  =", key_path,  file=sys.stderr)
+        try:
+            print("🔍 [DEBUG] /op_certs/ServerCerts contains:", os.listdir("/op_certs/ServerCerts"), file=sys.stderr)
+        except Exception as e:
+            print("🔍 [DEBUG] could not list /op_certs/ServerCerts:", e, file=sys.stderr)
+
         sslContext.load_cert_chain(certfile=cert_path, keyfile=key_path)
 
-        # pick your hybrid TLS KEM group
-        sslContext.set_ecdh_curve("P-256+Kyber512")
+
+
+        # only set the classical curve; OQS provider will enable Kyber512 via TLS_DEFAULT_GROUPS
+        sslContext.set_ecdh_curve("prime256v1")
+
 
         if SAVE_TLS_DEBUG:
             sslContext.keylog_filename = keylog

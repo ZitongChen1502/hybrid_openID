@@ -25,7 +25,7 @@ RUN echo "=== Building OpenSSL 3.3.0 ===" \
  && ./config \
       --prefix=/usr/local/openssl-3.3 \
       --openssldir=/usr/local/openssl-3.3/ssl \
-      shared zlib no-docs no-apps \
+      shared zlib no-docs \
  && echo "=== Running make for OpenSSL 3.3.0 ===" \
  && make -j"$(nproc)" \
  && echo "=== Running make install for OpenSSL 3.3.0 ===" \
@@ -99,125 +99,74 @@ RUN echo "=== Locating and copying oqsprovider.so to system path ===" \
  && echo "=== Done copying provider ===" \
  && ls -l ${SYSTEM_MODULE_PATH}/oqsprovider.so
 
-# 5) Update ld cache so system openssl can find liboqs dependency
-# Renumbered from 4.1
-RUN echo "=== Updating linker cache for builder stage ===" \
- && printf "/usr/local/lib\n/usr/local/lib64\n${OPENSSL_CUSTOM_LIB_DIR}\n" \
-      > /etc/ld.so.conf.d/all-libs-builder.conf \
- && ldconfig \
- && echo "=== Linker cache updated ==="
+# 5) Update ld cache so custom OpenSSL libs are found:
+     RUN printf "/usr/local/openssl-3.3/lib\n/usr/local/openssl-3.3/lib64\n/usr/local/lib\n/usr/local/lib64\n" \
+     > /etc/ld.so.conf.d/openssl-3.3.conf \
+&& ldconfig
 
-# 6) Build liboqs-python
-WORKDIR /opt/liboqs-python
-RUN echo "=== Building liboqs-python ===" \
- && git clone --depth 1 https://github.com/open-quantum-safe/liboqs-python.git . \
- && pip3 install . \
- && echo "=== Finished liboqs-python install ==="
-
-# 7) Generate certs using SYSTEM openssl
-WORKDIR /opt
-COPY gen-certs/gen-certs.sh   /opt/gen-certs.sh
-COPY gen-certs/cert-confs      /opt/cert-confs/
-COPY op_certs /op_certs
-# Set args as ENV for the script
-# OPENSSL_MODULES is already set to the system path
-# include OPENSSL_MODULES pointing to where you copied oqsprovider.so
-ENV OP_IP=${OP_IP} \
-    TLS_SIGALG=${TLS_SIGALG} \
-    JWT_SIGN=${JWT_SIGN} \
-    OQS_OPENSSL_CMD=/usr/bin/openssl \
-    OPENSSL_MODULES=${SYSTEM_MODULE_PATH} \
-    LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:${OPENSSL_CUSTOM_LIB_DIR}
-
-RUN echo "=== Running gen-certs.sh ===" \
- && chmod +x /opt/gen-certs.sh \
- && /opt/gen-certs.sh \
- && echo "=== Finished gen-certs.sh ===" \
- && ls -lR op_certs
-
-
+# (no other changes until final image)
 # ───────────────────────────────────────────────────────────────────
+
 # STAGE 2: final OP image
+
 # ───────────────────────────────────────────────────────────────────
+
 FROM python:3.13-slim
 
-# Dockerfile
 
 
-# install your runtime dependencies
-RUN pip install flask oic pyOpenSSL oqs
+# install runtime & build deps for python-ldap
 
-# Create directories
-RUN mkdir -p /app /op_certs
-
-# Copy your certs in exactly the path your code expects
-COPY /op_certs /op_certs
-
-
-# Re-declare build args for use in final ENV
-ARG OP_IP=op
-ARG TLS_SIGALG=p256_falcon512
-ARG JWT_SIGN=p256_falcon512
-
-
-# liboqs libs
-COPY --from=builder /usr/local/lib  /usr/local/lib
-COPY --from=builder /usr/local/lib64 /usr/local/lib64
-
-
-# custom OpenSSL libs (needed for liboqs symbols)
-COPY --from=builder /usr/local/openssl-3.3/lib  /usr/local/openssl-3.3/lib
-COPY --from=builder /usr/local/openssl-3.3/lib64 /usr/local/openssl-3.3/lib64
-
-# OQS provider module
-COPY --from=builder \
-     /usr/lib/x86_64-linux-gnu/ossl-modules/oqsprovider.so \
-     /usr/lib/x86_64-linux-gnu/ossl-modules/
-# Generated Certs
-COPY --from=builder /opt/op_certs           /op_certs
-# Python Wrapper source
-COPY --from=builder /opt/liboqs-python      /opt/liboqs-python
-
-# Symlink for Python ctypes wrapper
-RUN for d in /usr/local/lib /usr/local/lib64; do \
-      # Check if the directory exists before trying to link
-      if [ -d "$d" ] && [ -f "$d/liboqs.so" ]; then \
-        echo "OP Final Stage: Linking liboqs.so in $d"; \
-        cd "$d" && \
-        ln -sf liboqs.so libliboqs.so && \
-        ln -sf liboqs.so libliboqs.a; \
-      fi; \
-    done
-
-# Update loader cache in final image
-# Include custom OpenSSL libs and system module path
-RUN printf "/usr/local/lib\n/usr/local/lib64\n/usr/local/openssl-3.3/lib\n/usr/local/openssl-3.3/lib64\n/usr/lib/x86_64-linux-gnu/ossl-modules\n" \
-      > /etc/ld.so.conf.d/all-libs.conf \
- && ldconfig
-
-# Install Python wrapper
-RUN pip3 install --no-cache-dir /opt/liboqs-python
-
-# Runtime deps (Need libssl3 from system for Python runtime compatibility)
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      libssl3 gcc python3-dev libldap2-dev libsasl2-dev findutils binutils \
+      libssl3 \
+      gcc \
+      python3-dev \
+      libldap2-dev \
+      libsasl2-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# Runtime environment
-# Point to custom OpenSSL libs (for liboqs dep) and system provider path
-ENV LD_LIBRARY_PATH=/usr/local/openssl-3.3/lib64:/usr/local/openssl-3.3/lib:/usr/local/lib:/usr/local/lib64:/usr/lib/x86_64-linux-gnu/ossl-modules \
-    # Point OPENSSL_MODULES to the system path where provider lives
-    OPENSSL_MODULES=/usr/lib/x86_64-linux-gnu/ossl-modules \
-    # Pass through build-time args to runtime if needed by app.py
-    OP_IP=${OP_IP} \
-    TLS_SIGN=${TLS_SIGALG} \
-    JWT_SIGN=${JWT_SIGN}
+# Copy our hybrid-enabled OpenSSL binary and its libs + provider module:
+
+COPY --from=builder /usr/local/openssl-3.3/bin/openssl /usr/local/bin/openssl
+
+COPY --from=builder /usr/local/openssl-3.3/lib /usr/local/openssl-3.3/lib
+
+COPY --from=builder /usr/local/openssl-3.3/lib64 /usr/local/openssl-3.3/lib64
+
+COPY --from=builder /usr/lib/x86_64-linux-gnu/ossl-modules/oqsprovider.so \
+                   /usr/lib/x86_64-linux-gnu/ossl-modules/
+
+
+COPY op/op_certs/ServerCerts/ /op_certs/ServerCerts/
+                   
+
+
+# Update loader cache again in final image:
+
+RUN printf "/usr/local/openssl-3.3/lib\n/usr/local/openssl-3.3/lib64\n/usr/local/lib\n/usr/local/lib64\n/usr/lib/x86_64-linux-gnu/ossl-modules\n" \
+     > /etc/ld.so.conf.d/openssl-3.3.conf \
+&& ldconfig
+
+
+
+# Make sure the openssl CLI uses our provider path:
+
+ENV OPENSSL_MODULES=/usr/lib/x86_64-linux-gnu/ossl-modules \
+   LD_LIBRARY_PATH=/usr/local/openssl-3.3/lib:/usr/local/openssl-3.3/lib64:/usr/local/lib:/usr/local/lib64
+
+
 
 WORKDIR /app
-COPY app/requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
-COPY app /app
+
+COPY op/app/requirements.txt .
+
+RUN pip3 install -r requirements.txt
+
+COPY op/app /app
+
+
 
 EXPOSE 8080
+
 CMD ["python3","app.py"]

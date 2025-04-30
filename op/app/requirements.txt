@@ -8,3 +8,4 @@ requests==2.25.1
 six==1.16.0
 typing_extensions==4.3.0
 Werkzeug==2.2.2
+oqs==0.10.2

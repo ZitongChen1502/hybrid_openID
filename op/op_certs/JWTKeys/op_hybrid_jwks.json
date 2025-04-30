@@ -5,17 +5,15 @@
       "crv": "P-256",
       "x": "jemXbZoWInODKrNRellhuWeHhILSGbw1OlY9vJs8SdY",
       "y": "6aFbnLgjA7WYUxDQsz_5UDpuzxuTCbYZ08IhTuE7qMs",
-      "d": "a-FkOMS4SZa2eg3xu4KQwMyokVQ1a2e6urCI3-beI1A",
       "alg": "ES256_FALCON512",
-      "kid": "ec1"
+      "kid": "ec1",
+      "use": ["sig"]
     },
     {
       "kty": "PQC",
-      "alg": "Falcon-512",
-      "use": [
-        "sig"
-      ],
+      "alg": "ES256_FALCON512",
       "kid": "falcon1",
+      "use": ["sig"],
       "x": "CWzqFiqbK_hX3BJS8e1Xk1y5KB3GKakoE_RjYVtfRY2VxWh_cJxXQ0UKk0hxKwVqi1l1vYa7dFOTO8IsEpekxRkKxXWUQ8ek_RIpw1UdHU4W1COcbpe6elv3B0m6xGLGKtXod_gukZalQasMZ2XrX8ohaumX0QDTC2Je4V9cwHuKE7mRm_IJKKAXyl4AlprItm1gTH1qSSZFz5uTBHaDuIUlisqbyMLVjZPIy3lpLBIsrR-RZohXYtblqKAHr0XBlth34Vl1-KBGuhlZKvYidHXhBlU1qePxi8BkkGIavlFrsu63FccW4WTwGYjsAf9VUXalVlD-dqBRZHWIjpAEp7AIyrUeoGNXnd2VNhIVG0BclKMSckje6fOrwqF51plkhiSQ1EDekRxSB9A5mA-XXLJmxN9PfxWaxqaSDrGSRPF9a3Sg3WzoP1odGCiesuUgXwVkN1e1jiCQXbvTJh82cfEZA3Rdybe4HzaZJSFBVrFowePQvsQQtGSFSh-BGvm2i_h-SacQVyblnc48gk8D0nFlSQYgTmiveI8xzVoRlGxR95jlHgaqtft02d0CVOZCwAkYYibOk8OuGHIBXHKOCuao4UiDB9fiv3Zxt__iJRQCwDF2WVmupWUHEN1PMm1iqJ7N9l9hF3KnZOpUAXNoy26hb04C0eqnvUuJrWXhVzIWFdCASVTYT4nxIoyd23q9L2Q1jddyBHO3VYFMnXLPuETDhFguf-PEJk46zkBWrQ-pkB3A6dZf62kWiAuLWiGCjsgp92-btb7KMmsrV6GgVpHiSRkIgW7zMoHyTjq-5fvq_D7MR9LsRfhPTVpLLuCGVfW0dzNrb0PUnnpkKjYuSt4TnmXMSabmVjfNvBoOM5XK2OOOeJYx-MTcNz1rgSoXZaJCEMEnjTAQEYxrV114mnBmGXDAOaZBNDLQBqdKPiAAGdR4CcnFyo1ovg-NmEiNLRy_mi7XFlTRPLXcVjYsXF3-mDEDyydvXM-rYwhnJI6qxNiWgZxUdYXNzXeJcvvk1duANCrUOFeMvBq1exvw3Nt-VlxJPaHMGWzrReLlW43o7Fuk7qZ4LHVp2Sk0lbyIo4rVZLNhTLZ4FbuGMuuGRBe6r9XoS4pTh008VybrExiD7iqnGMO6DZW46yYTSI6mLGsSpYy9vtSrX5rpYZVEWMaOOKu9x2dyKsp94iuCnt4L"
     }
   ]
